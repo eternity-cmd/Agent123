@@ -32,10 +32,12 @@ import pandas as pd
 from .job_profile_aggregator import aggregate_job_profile_group, build_demo_dataframe as build_aggregator_demo_df
 from .job_profile_builder import build_job_profile_input_payload
 from llm_interface_layer.llm_service import call_llm
+from llm_interface_layer.state_manager import StateManager
 
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_OUTPUT_PATH = Path("outputs/state/job_profile_service_result.json")
+DEFAULT_STATE_PATH = Path("outputs/state/student.json")
 
 
 @dataclass
@@ -330,6 +332,9 @@ def build_job_profile_llm_input(
 class JobProfileService:
     """job_profile 业务服务编排器。"""
 
+    def __init__(self, state_manager: Optional[StateManager] = None) -> None:
+        self.state_manager = state_manager or StateManager()
+
     def build_features(
         self,
         df: pd.DataFrame,
@@ -357,6 +362,7 @@ class JobProfileService:
         self,
         builder_payload: Dict[str, Any],
         aggregation_result: Dict[str, Any],
+        student_state: Optional[Dict[str, Any]] = None,
         context_data: Optional[Dict[str, Any]] = None,
         extra_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -384,21 +390,38 @@ class JobProfileService:
             task_type="job_profile",
             input_data=input_data,
             context_data=context_data,
-            student_state=None,
+            student_state=student_state,
             extra_context=merged_extra_context,
+        )
+
+    def update_student_state(
+        self,
+        job_profile_result: Dict[str, Any],
+        state_path: str | Path = DEFAULT_STATE_PATH,
+        student_state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """写回 student.json 的 job_profile_result 字段。"""
+        return self.state_manager.update_state(
+            task_type="job_profile",
+            task_result=job_profile_result,
+            state_path=state_path,
+            student_state=student_state,
         )
 
     def run(
         self,
         df: pd.DataFrame,
         standard_job_name: str,
+        state_path: str | Path = DEFAULT_STATE_PATH,
         context_data: Optional[Dict[str, Any]] = None,
         extra_context: Optional[Dict[str, Any]] = None,
         output_path: Optional[str | Path] = DEFAULT_OUTPUT_PATH,
     ) -> Dict[str, Any]:
         """执行完整 job_profile 服务流程。"""
         setup_logging()
+        state_path = Path(state_path)
         service_warnings = []
+        student_state = self.state_manager.load_state(state_path)
 
         LOGGER.info("Step 1/4: build job profile payload for %s", standard_job_name)
         try:
@@ -441,6 +464,7 @@ class JobProfileService:
             llm_result = self.call_job_profile_llm(
                 builder_payload=builder_payload,
                 aggregation_result=aggregation_result,
+                student_state=student_state,
                 context_data=context_data,
                 extra_context=extra_context,
             )
@@ -456,6 +480,12 @@ class JobProfileService:
             llm_result=llm_result,
             service_warnings=service_warnings,
         )
+
+        self.update_student_state(
+            job_profile_result=final_result,
+            state_path=state_path,
+            student_state=student_state,
+        )
         save_json(final_result, output_path)
 
         LOGGER.info(
@@ -470,6 +500,7 @@ class JobProfileService:
 def run_job_profile_service(
     df: pd.DataFrame,
     standard_job_name: str,
+    state_path: str | Path = DEFAULT_STATE_PATH,
     context_data: Optional[Dict[str, Any]] = None,
     extra_context: Optional[Dict[str, Any]] = None,
     output_path: Optional[str | Path] = DEFAULT_OUTPUT_PATH,
@@ -478,6 +509,7 @@ def run_job_profile_service(
     return JobProfileService().run(
         df=df,
         standard_job_name=standard_job_name,
+        state_path=state_path,
         context_data=context_data,
         extra_context=extra_context,
         output_path=output_path,
